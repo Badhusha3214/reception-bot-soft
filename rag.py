@@ -1,39 +1,51 @@
 import os
-from dotenv import load_dotenv
 import logging
-from typing import List, Optional, Dict, Any
+import time
+from typing import List, Dict, Any
+import re
 
+# Machine Learning and NLP Libraries
+from dotenv import load_dotenv
 import chromadb
 from sentence_transformers import SentenceTransformer
-from pypdf import PdfReader
-import pandas as pd
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
+import whisper
+import pyaudio
+import numpy as np
+import torch
+import pandas as pd
+from pypdf import PdfReader
 
-class EnhancedRAGSystem:
-    def __init__(self, 
-                 embedding_model: str = 'all-MiniLM-L6-v2',
-                 chunk_size: int = 300, 
-                 overlap: int = 50,
-                 gemini_api_key: str = None):
+import speech_recognition as sr
+import pyttsx3
+
+class RobotRAGSystem:
+    def __init__(
+        self, 
+        embedding_model: str = 'all-MiniLM-L6-v2',
+        chunk_size: int = 300, 
+        overlap: int = 50,
+        gemini_api_key: str = None,
+        robot_name: str = "RoboAssistant"
+    ):
         """
-        Initialize RAG system with ChromaDB, embedding model, and Gemini
+        Initialize comprehensive robot RAG system
         
         Args:
-            embedding_model (str): Sentence transformer model for embeddings
-            chunk_size (int): Size of text chunks
-            overlap (int): Overlap between chunks
-            gemini_api_key (str): Google API key for Gemini
+            embedding_model (str): Sentence transformer model
+            chunk_size (int): Text chunk size
+            overlap (int): Chunk overlap
+            gemini_api_key (str): Google AI API key
+            robot_name (str): Name of the robot
         """
         # Logging setup
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
         
-        # Ensure storage directory exists
+        # ChromaDB setup
         storage_path = os.path.join(os.getcwd(), "chromadb_storage")
         os.makedirs(storage_path, exist_ok=True)
-        
-        # ChromaDB setup with updated configuration
         self.chroma_client = chromadb.PersistentClient(path=storage_path)
         
         # Embedding model
@@ -43,7 +55,7 @@ class EnhancedRAGSystem:
         self.chunk_size = chunk_size
         self.overlap = overlap
         
-        # Collection to store embeddings
+        # ChromaDB Collection
         self.collection = self.chroma_client.get_or_create_collection(
             name="document_collection",
             metadata={"hnsw:space": "cosine"}
@@ -52,29 +64,51 @@ class EnhancedRAGSystem:
         # Document tracking
         self.document_metadata = {}
         
-        # Initialize Gemini
+        # Gemini Setup
         if not gemini_api_key:
             gemini_api_key = os.getenv('GEMINI_API_KEY')
         if not gemini_api_key:
-            raise ValueError("Gemini API key must be provided or set in GEMINI_API_KEY environment variable")
+            self.logger.error("Gemini API key must be provided")
+            raise ValueError("Gemini API key must be provided")
         
         genai.configure(api_key=gemini_api_key)
         self.model = genai.GenerativeModel('gemini-pro')
         
-        # Configure safety settings
+        # Safety settings
         self.safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
             HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
             HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
+        
+        # Replace Whisper with simple speech recognition
+        self.speech_recognizer = sr.Recognizer()
+        self.tts_engine = pyttsx3.init()
+        self.robot_name = robot_name
+        
+        # Initialize and configure text-to-speech
+        self.tts_engine = pyttsx3.init()
+        
+        # Get available voices
+        voices = self.tts_engine.getProperty('voices')
+        
+        # Configure voice properties
+        # Try to find a suitable voice (usually the second voice is female)
+        for voice in voices:
+            if "english" in voice.name.lower():
+                self.tts_engine.setProperty('voice', voice.id)
+                break
+        
+        # Adjust speech rate (lower number = slower speech)
+        self.tts_engine.setProperty('rate', 150)  # Default is 200
+        
+        # Adjust volume
+        self.tts_engine.setProperty('volume', 0.9)  # Range: 0.0 to 1.0
     
     def load_documents(self, document_paths: List[str]) -> None:
         """
         Load documents from multiple sources
-        
-        Args:
-            document_paths (List[str]): List of file paths to load
         """
         for path in document_paths:
             if not os.path.exists(path):
@@ -257,7 +291,7 @@ Please provide a clear and concise answer based only on the information provided
         if query.lower().strip() in greetings:
             return {
                 'query': query,
-                'answer': "Hello! I'm here to help answer your questions about the loaded documents. What would you like to know?",
+                'answer': f"Hello! I'm {self.robot_name}. I'm here to help answer your questions about the loaded documents. What would you like to know?",
                 'context': [],
                 'sources': []
             }
@@ -275,41 +309,132 @@ Please provide a clear and concise answer based only on the information provided
                 for chunk in relevant_context
             ]))
         }
+    
+    def listen_for_speech(self) -> str:
+        """
+        Listen for speech input and convert to text
+        """
+        with sr.Microphone() as source:
+            print("\nListening...")
+            # Adjust for ambient noise
+            self.speech_recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            try:
+                # Listen for audio input
+                audio = self.speech_recognizer.listen(source, timeout=5, phrase_time_limit=10)
+                # Convert speech to text using Google's speech recognition
+                text = self.speech_recognizer.recognize_google(audio)
+                print(f"You said: {text}")
+                return text
+            except sr.WaitTimeoutError:
+                print("No speech detected")
+                return ""
+            except sr.UnknownValueError:
+                print("Could not understand audio")
+                return ""
+            except sr.RequestError as e:
+                print(f"Could not request results; {e}")
+                return ""
+    
+    def run_interactive_loop(self):
+        """
+        Interactive loop with Indian English greeting
+        """
+        welcome_message = f"Namaste! I am {self.robot_name}. I am here to help you with your questions!"
+        print(welcome_message)
+        self.speak_response(welcome_message)
+        
+        while True:
+            try:
+                # Get input (voice or typed)
+                query = self.listen_for_speech()
+                
+                # Check for exit commands
+                if query.lower() in ['exit', 'quit', 'goodbye', 'bye']:
+                    farewell = "Thank you for your time. Have a good day!"
+                    print("\n" + farewell)
+                    self.speak_response(farewell)
+                    break
+                
+                if query:
+                    # Process the query
+                    result = self.process_query(query)
+                    
+                    # Print answer
+                    print("\n--- Answer ---")
+                    print(f"Answer: {result['answer']}")
+                    print(f"Sources: {result['sources']}")
+                    
+                    # Speak the answer with pauses
+                    self.speak_response(result['answer'])
+                    
+            except KeyboardInterrupt:
+                print("\nShutting down the system. Thank you for your time!")
+                self.speak_response("Thank you for your time. Have a good day!")
+                break
+            except Exception as e:
+                print(f"An error occurred: {e}")
+                self.speak_response("I apologize, there seems to be an error. Please try again.")
+                time.sleep(1)
+    
+    def speak_response(self, text: str):
+        """
+        Convert text to speech with Indian English style formatting
+        """
+        try:
+            # Pre-process text to improve pronunciation
+            text = self._format_for_indian_english(text)
+            
+            # Speak with pauses at punctuation
+            sentences = text.split('.')
+            for sentence in sentences:
+                if sentence.strip():
+                    self.tts_engine.say(sentence.strip())
+                    self.tts_engine.runAndWait()
+                    time.sleep(0.5)  # Add pause between sentences
+                
+        except Exception as e:
+            print(f"Error in text-to-speech: {e}")
+            print("Continuing with text-only output...")
+    
+    def _format_for_indian_english(self, text: str) -> str:
+        """
+        Format text to improve Indian English pronunciation
+        """
+        # Common Indian English pronunciation adjustments
+        replacements = {
+            'data': 'daata',
+            'process': 'prosess',
+            'project': 'projekt',
+            'system': 'sistum',
+            'hello': 'helo',
+            'hi': 'hai',
+            'thanks': 'thank you',
+            'okay': 'ok',
+        }
+        
+        # Apply replacements
+        formatted_text = text
+        for old, new in replacements.items():
+            formatted_text = re.sub(r'\b' + old + r'\b', new, formatted_text, flags=re.IGNORECASE)
+        
+        return formatted_text
 
 def main():
-    # Load the .env file
+    # Load environment variables
     load_dotenv()
     
-    # Get API key from environment variable
-    api_key = os.getenv('GEMINI_API_KEY')
-    if not api_key:
-        print("Please set the GEMINI_API_KEY environment variable")
-        return
-
-    # Initialize RAG system with Gemini
-    rag_system = EnhancedRAGSystem(gemini_api_key=api_key)
+    # Create robot RAG system
+    robot_rag = RobotRAGSystem(robot_name="RoboAssistant")
     
     # Load documents
     document_paths = [
-        'data/college_overview.pdf',
-        'data/mission_statement.txt'
+        'data/1.pdf',
+        'data/2.pdf'
     ]
+    robot_rag.load_documents(document_paths)
     
-    print("Loading documents...")
-    rag_system.load_documents(document_paths)
-    print("Documents loaded! Ready to answer questions.")
-    print("Enter your questions (press Ctrl+C to exit):")
-    
-    try:
-        while True:
-            query = input("\nYour question: ").strip()
-            if query:
-                result = rag_system.process_query(query)
-                print("\n--- Answer ---")
-                print(f"Answer: {result['answer']}")
-                print(f"Sources: {result['sources']}")
-    except KeyboardInterrupt:
-        print("\nShutting down the RAG system. Goodbye!")
+    # Run interactive loop
+    robot_rag.run_interactive_loop()
 
 if __name__ == "__main__":
     main()
