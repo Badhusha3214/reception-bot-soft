@@ -1,0 +1,26 @@
+# Core RAG System Dependencies
+langchain>=0.1.0
+chromadb>=0.4.22
+sentence-transformers>=2.2.2
+google-generativeai>=0.3.0
+python-dotenv>=1.0.0
+PyPDF2>=3.0.0
+docx2txt>=0.8
+
+# Speech Recognition and Text-to-Speech
+SpeechRecognition>=3.10.0
+pyttsx3>=2.90
+pyaudio>=0.2.13
+
+# GUI and Visualization
+tkinter
+matplotlib>=3.7.1
+numpy>=1.24.3
+
+# Optional but recommended for better performance
+torch>=2.0.0
+transformers>=4.30.0
+
+# Development and Utility
+python-dotenv>=1.0.0
+tqdm>=4.65.0

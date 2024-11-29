@@ -3,6 +3,7 @@ import logging
 import time
 from typing import List, Dict, Any
 import re
+import threading
 
 # Machine Learning and NLP Libraries
 from dotenv import load_dotenv
@@ -18,7 +19,12 @@ import pandas as pd
 from pypdf import PdfReader
 
 import speech_recognition as sr
-import pyttsx3
+import edge_tts  # Added EdgeTTS import
+import asyncio
+import pygame  # For audio playback if needed
+
+import tkinter as tk
+from voice_visualizer import VoiceVisualizer
 
 class RobotRAGSystem:
     def __init__(
@@ -27,7 +33,9 @@ class RobotRAGSystem:
         chunk_size: int = 300, 
         overlap: int = 50,
         gemini_api_key: str = None,
-        robot_name: str = "RoboAssistant"
+        robot_name: str = "RoboAssistant",
+        wake_word: str = "hey assistant",
+        voice: str = "en-US-AriaNeural"  # Default EdgeTTS voice
     ):
         """
         Initialize comprehensive robot RAG system
@@ -38,6 +46,8 @@ class RobotRAGSystem:
             overlap (int): Chunk overlap
             gemini_api_key (str): Google AI API key
             robot_name (str): Name of the robot
+            wake_word (str): Wake word for the robot
+            voice (str): EdgeTTS voice to use
         """
         # Logging setup
         logging.basicConfig(level=logging.INFO)
@@ -84,28 +94,22 @@ class RobotRAGSystem:
         
         # Replace Whisper with simple speech recognition
         self.speech_recognizer = sr.Recognizer()
-        self.tts_engine = pyttsx3.init()
+        
+        # Initialize pygame mixer for audio playback
+        pygame.mixer.init()
+        
+        # Configuration
         self.robot_name = robot_name
+        self.wake_word = wake_word.lower()
+        self.is_listening = False
         
-        # Initialize and configure text-to-speech
-        self.tts_engine = pyttsx3.init()
+        # Initialize GUI
+        self.root = tk.Tk()
+        self.visualizer = VoiceVisualizer(self.root)
         
-        # Get available voices
-        voices = self.tts_engine.getProperty('voices')
-        
-        # Configure voice properties
-        # Try to find a suitable voice (usually the second voice is female)
-        for voice in voices:
-            if "english" in voice.name.lower():
-                self.tts_engine.setProperty('voice', voice.id)
-                break
-        
-        # Adjust speech rate (lower number = slower speech)
-        self.tts_engine.setProperty('rate', 150)  # Default is 200
-        
-        # Adjust volume
-        self.tts_engine.setProperty('volume', 0.9)  # Range: 0.0 to 1.0
-    
+        self.tts_voice = voice
+
+            
     def load_documents(self, document_paths: List[str]) -> None:
         """
         Load documents from multiple sources
@@ -320,32 +324,58 @@ Please provide a clear and concise answer based only on the information provided
             self.speech_recognizer.adjust_for_ambient_noise(source, duration=0.5)
             try:
                 # Listen for audio input
-                audio = self.speech_recognizer.listen(source, timeout=5, phrase_time_limit=10)
+                audio = self.speech_recognizer.listen(source, timeout=3, phrase_time_limit=5)
                 # Convert speech to text using Google's speech recognition
                 text = self.speech_recognizer.recognize_google(audio)
                 print(f"You said: {text}")
                 return text
             except sr.WaitTimeoutError:
                 print("No speech detected")
+                # self.speak_response("")
                 return ""
             except sr.UnknownValueError:
                 print("Could not understand audio")
+                # self.speak_response("manasilakunne valom parayanam ")
                 return ""
             except sr.RequestError as e:
                 print(f"Could not request results; {e}")
                 return ""
     
+    def listen_for_wake_word(self) -> bool:
+        """
+        Listen specifically for the wake word
+        """
+        with sr.Microphone() as source:
+            print("\nWaiting for wake word...")
+            self.speech_recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            try:
+                audio = self.speech_recognizer.listen(source, timeout=3, phrase_time_limit=3)
+                text = self.speech_recognizer.recognize_google(audio).lower()
+                print(f"Heard: {text}")
+                return self.wake_word in text
+            except (sr.WaitTimeoutError, sr.UnknownValueError, sr.RequestError):
+                return False
+    
     def run_interactive_loop(self):
         """
-        Interactive loop with Indian English greeting
+        Interactive loop with wake word detection
         """
-        welcome_message = f"Namaste! I am {self.robot_name}. I am here to help you with your questions!"
+        welcome_message = f"Namaste! I am {self.robot_name}. Say '{self.wake_word}' to get my attention!"
         print(welcome_message)
         self.speak_response(welcome_message)
         
         while True:
             try:
-                # Get input (voice or typed)
+                # First, listen for wake word
+                if not self.listen_for_wake_word():
+                    continue
+                
+                # Wake word detected
+                activation_message = "Yes, I'm listening!"
+                print("\n" + activation_message)
+                self.speak_response(activation_message)
+                
+                # Get the actual query
                 query = self.listen_for_speech()
                 
                 # Check for exit commands
@@ -366,7 +396,7 @@ Please provide a clear and concise answer based only on the information provided
                     
                     # Speak the answer with pauses
                     self.speak_response(result['answer'])
-                    
+                
             except KeyboardInterrupt:
                 print("\nShutting down the system. Thank you for your time!")
                 self.speak_response("Thank you for your time. Have a good day!")
@@ -376,26 +406,53 @@ Please provide a clear and concise answer based only on the information provided
                 self.speak_response("I apologize, there seems to be an error. Please try again.")
                 time.sleep(1)
     
+
+
     def speak_response(self, text: str):
         """
-        Convert text to speech with Indian English style formatting
+        Convert text to speech using EdgeTTS with visualization
         """
         try:
-            # Pre-process text to improve pronunciation
+            # Update visualizer text
+            self.visualizer.update_text(f"Assistant: {text}", clear=True)
+            
+            # Pre-process text for better pronunciation
             text = self._format_for_indian_english(text)
             
-            # Speak with pauses at punctuation
-            sentences = text.split('.')
-            for sentence in sentences:
-                if sentence.strip():
-                    self.tts_engine.say(sentence.strip())
-                    self.tts_engine.runAndWait()
-                    time.sleep(0.5)  # Add pause between sentences
-                
+            # Ensure output directory exists
+            os.makedirs('temp_audio', exist_ok=True)
+            
+            # Create a unique temporary audio file name
+            import uuid
+            temp_audio_file = os.path.join('temp_audio', f'response_{uuid.uuid4()}.mp3')
+            
+            # Use async function to generate speech
+            async def generate_speech():
+                communicate = edge_tts.Communicate(text, self.tts_voice)
+                await communicate.save(temp_audio_file)
+            
+            # Run the async function
+            asyncio.run(generate_speech())
+            
+            # Play the audio
+            pygame.mixer.init()
+            pygame.mixer.music.load(temp_audio_file)
+            pygame.mixer.music.play()
+            
+            # Wait for playback to finish
+            while pygame.mixer.music.get_busy():
+                pygame.time.Clock().tick(10)
+            
+            # Clean up temporary audio file
+            try:
+                os.remove(temp_audio_file)
+            except PermissionError:
+                print(f"Could not remove temporary audio file: {temp_audio_file}")
+            
         except Exception as e:
             print(f"Error in text-to-speech: {e}")
-            print("Continuing with text-only output...")
-    
+            self.visualizer.update_text(f"Error: {e}")
+
     def _format_for_indian_english(self, text: str) -> str:
         """
         Format text to improve Indian English pronunciation
@@ -419,12 +476,30 @@ Please provide a clear and concise answer based only on the information provided
         
         return formatted_text
 
+    def cleanup_temp_audio(self):
+        """
+        Clean up temporary audio files after a specified time.
+        """
+        time.sleep(60)  # Wait for 60 seconds before cleaning up
+        try:
+            for filename in os.listdir('temp_audio'):
+                file_path = os.path.join('temp_audio', filename)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+                    print(f"Deleted temporary audio file: {file_path}")
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+
 def main():
     # Load environment variables
     load_dotenv()
     
-    # Create robot RAG system
-    robot_rag = RobotRAGSystem(robot_name="RoboAssistant")
+    # Create robot RAG system with wake word and specific voice
+    robot_rag = RobotRAGSystem(
+        robot_name="RoboAssistant",
+        wake_word="hey assistant",  # You can customize this
+        voice="en-US-AriaNeural"  # You can change this to other available voices
+    )
     
     # Load documents
     document_paths = [
